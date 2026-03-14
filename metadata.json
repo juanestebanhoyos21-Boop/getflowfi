@@ -1,0 +1,5 @@
+{
+  "name": "FinanzaFlow",
+  "description": "Una aplicación sencilla y elegante para gestionar tus finanzas personales: ingresos, gastos y ahorros.",
+  "requestFramePermissions": []
+}
