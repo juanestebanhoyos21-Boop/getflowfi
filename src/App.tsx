@@ -204,6 +204,7 @@ export default function App() {
   const [filterMonth, setFilterMonth] = useState(new Date().getMonth().toString());
   const [filterYear, setFilterYear] = useState(new Date().getFullYear().toString());
   const [alerts, setAlerts] = useState<string[]>([]);
+  const [showAllTx, setShowAllTx] = useState(false);
 
   const t = T[lang];
 
@@ -467,12 +468,37 @@ export default function App() {
           </div>
 
           {/* Stats */}
-          <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
-            <StatCard label={t.income} value={stats.income} icon={ArrowUpCircle} accent="#10b981" bg="#f0fdf4" active={activeView === 'income'} onClick={() => setActiveView('income')} />
-            <StatCard label={t.expenses} value={stats.expenses} icon={ArrowDownCircle} accent="#ef4444" bg="#fef2f2" active={activeView === 'expenses'} onClick={() => setActiveView('expenses')} />
-            <StatCard label={t.savings} value={stats.savings} icon={PiggyBank} accent="#6366f1" bg="#eef2ff" active={activeView === 'savings'} onClick={() => setActiveView('savings')} />
-            <StatCard label={t.totalBalance} value={stats.balance} icon={Wallet} accent={stats.balance >= 0 ? '#0f0f0f' : '#ef4444'} bg="#f9fafb" active={false} onClick={() => setActiveView('dashboard')} />
-          </div>
+          {activeView === 'dashboard' && (
+            <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+              <StatCard label={t.income} value={stats.income} icon={ArrowUpCircle} accent="#10b981" bg="#f0fdf4" active={false} onClick={() => setActiveView('income')} />
+              <StatCard label={t.expenses} value={stats.expenses} icon={ArrowDownCircle} accent="#ef4444" bg="#fef2f2" active={false} onClick={() => setActiveView('expenses')} />
+              <StatCard label={t.savings} value={stats.savings} icon={PiggyBank} accent="#6366f1" bg="#eef2ff" active={false} onClick={() => setActiveView('savings')} />
+              <StatCard label={t.totalBalance} value={stats.balance} icon={Wallet} accent={stats.balance >= 0 ? '#0f0f0f' : '#ef4444'} bg="#f9fafb" active={false} onClick={() => setActiveView('dashboard')} />
+            </div>
+          )}
+          {activeView === 'income' && (
+            <div className="grid grid-cols-1 gap-3">
+              <StatCard label={t.income} value={stats.income} icon={ArrowUpCircle} accent="#10b981" bg="#f0fdf4" active={true} onClick={() => {}} />
+            </div>
+          )}
+          {activeView === 'expenses' && (
+            <div className="grid grid-cols-1 gap-3">
+              <StatCard label={t.expenses} value={stats.expenses} icon={ArrowDownCircle} accent="#ef4444" bg="#fef2f2" active={true} onClick={() => {}} />
+            </div>
+          )}
+          {activeView === 'savings' && (
+            <div className="grid grid-cols-1 gap-3">
+              <StatCard label={t.savings} value={stats.savings} icon={PiggyBank} accent="#6366f1" bg="#eef2ff" active={true} onClick={() => {}} />
+            </div>
+          )}
+          {activeView === 'budgets' && (
+            <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+              <StatCard label={t.income} value={stats.income} icon={ArrowUpCircle} accent="#10b981" bg="#f0fdf4" active={false} onClick={() => setActiveView('income')} />
+              <StatCard label={t.expenses} value={stats.expenses} icon={ArrowDownCircle} accent="#ef4444" bg="#fef2f2" active={false} onClick={() => setActiveView('expenses')} />
+              <StatCard label={t.savings} value={stats.savings} icon={PiggyBank} accent="#6366f1" bg="#eef2ff" active={false} onClick={() => setActiveView('savings')} />
+              <StatCard label={t.totalBalance} value={stats.balance} icon={Wallet} accent={stats.balance >= 0 ? '#0f0f0f' : '#ef4444'} bg="#f9fafb" active={false} onClick={() => setActiveView('dashboard')} />
+            </div>
+          )}
 
           <AnimatePresence mode="wait">
             <motion.div key={activeView} initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -8 }} transition={{ duration: 0.15 }} className="space-y-5">
@@ -510,12 +536,38 @@ export default function App() {
                     <div className="card p-6">
                       <div className="flex items-center justify-between mb-4">
                         <h3 className="font-display font-bold text-base">{t.recentTransactions}</h3>
-                        <button onClick={() => setActiveView('expenses')} className="text-indigo-400 hover:text-indigo-600 transition-colors"><ChevronRight size={18} /></button>
+                        <button onClick={() => setShowAllTx(v => !v)} className="flex items-center gap-1 text-indigo-400 hover:text-indigo-600 transition-colors text-xs font-semibold">
+                          {showAllTx ? (lang === 'es' ? 'Ver menos' : 'Show less') : (lang === 'es' ? 'Ver todo' : 'See all')}
+                          <ChevronRight size={16} className={cn("transition-transform duration-200", showAllTx && "rotate-90")} />
+                        </button>
                       </div>
-                      <div className="space-y-1">
-                        {filteredByPeriod.slice(0, 6).map(tx => <TxRow key={tx.id} tx={tx} onEdit={openEdit} onDelete={id => setDeleteConfirm(id)} />)}
-                        {filteredByPeriod.length === 0 && <EmptyState label={t.noTransactions} desc={t.noTransactionsDesc} onAdd={() => setModalMode('selection')} btnLabel={t.addNow} />}
-                      </div>
+                      {!showAllTx ? (
+                        <div className="space-y-1">
+                          {filteredByPeriod.sort((a,b) => new Date(b.date).getTime() - new Date(a.date).getTime()).slice(0, 5).map(tx => <TxRow key={tx.id} tx={tx} onEdit={openEdit} onDelete={id => setDeleteConfirm(id)} />)}
+                          {filteredByPeriod.length === 0 && <EmptyState label={t.noTransactions} desc={t.noTransactionsDesc} onAdd={() => setModalMode('selection')} btnLabel={t.addNow} />}
+                        </div>
+                      ) : (
+                        <div className="space-y-1">
+                          {/* Group by type */}
+                          {(['income', 'expense', 'saving'] as const).map(type => {
+                            const typeTxs = filteredByPeriod.filter(tx => tx.type === type).sort((a,b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+                            if (typeTxs.length === 0) return null;
+                            const typeColor = type === 'income' ? '#10b981' : type === 'expense' ? '#ef4444' : '#6366f1';
+                            const typeLabel = type === 'income' ? t.income : type === 'expense' ? t.expenses : t.savings;
+                            const typeTotal = typeTxs.reduce((a, tx) => a + tx.amount, 0);
+                            return (
+                              <div key={type} className="mb-4">
+                                <div className="flex items-center justify-between mb-2 px-2">
+                                  <span className="text-xs font-bold uppercase tracking-wider" style={{ color: typeColor }}>{typeLabel}</span>
+                                  <span className="text-xs font-bold" style={{ color: typeColor }}>{type === 'income' ? '+' : '-'}${typeTotal.toLocaleString()}</span>
+                                </div>
+                                {typeTxs.map(tx => <TxRow key={tx.id} tx={tx} onEdit={openEdit} onDelete={id => setDeleteConfirm(id)} />)}
+                              </div>
+                            );
+                          })}
+                          {filteredByPeriod.length === 0 && <EmptyState label={t.noTransactions} desc={t.noTransactionsDesc} onAdd={() => setModalMode('selection')} btnLabel={t.addNow} />}
+                        </div>
+                      )}
                     </div>
                   </div>
 
