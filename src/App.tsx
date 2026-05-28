@@ -22,6 +22,15 @@ import {
 } from 'recharts';
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
+import {
+  onAuthStateChange, signInWithEmail, signUpWithEmail, signOut,
+  fetchTransactions, saveTransaction, updateTransaction, deleteTransaction,
+  fetchGoals, saveGoal, updateGoal, deleteGoal,
+  fetchBudgetPlan, upsertBudgetPlan,
+  fetchIncomeRecords, saveIncomeRecord, updateIncomeRecord,
+  migrateLocalStorageToSupabase,
+} from './lib/db';
+import type { TxRow, GoalRow, BudgetRow, IncomeRow } from './lib/database.types';
 
 function cn(...inputs: ClassValue[]) { return twMerge(clsx(inputs)); }
 
@@ -349,6 +358,84 @@ function getCatName(id: string, lang: Lang): string {
   return id;
 }
 
+// ─── DB ROW MAPPERS ───────────────────────────────────────────────────────────
+// Convert Supabase snake_case rows → app camelCase objects
+
+function dbRowToTransaction(row: TxRow): Transaction {
+  return { id: row.id, amount: row.amount, category: row.category, description: row.description, date: row.date, type: row.type };
+}
+function dbRowToGoal(row: GoalRow): SavingGoal {
+  return { id: row.id, name: row.name, targetAmount: row.target_amount, currentAmount: row.current_amount, deadline: row.deadline, emoji: row.emoji, color: row.color };
+}
+function dbRowToBudgetPlan(row: BudgetRow): BudgetPlan {
+  return { income: row.income, frequency: row.frequency, budgets: (row.budgets as Record<string, number>) || {}, setupDone: row.setup_done, currentMonth: row.current_month };
+}
+function dbRowToIncomeRecord(row: IncomeRow): IncomeRecord {
+  return { id: row.id, amount: row.amount, date: row.date, description: row.description, distributed: row.distributed, allocations: (row.allocations as Record<string, number>) || {} };
+}
+
+// ─── LOGIN SCREEN ─────────────────────────────────────────────────────────────
+function LoginScreen() {
+  const [mode, setMode] = useState<'signin' | 'signup'>('signin');
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [error, setError] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [success, setSuccess] = useState('');
+
+  const handle = async () => {
+    if (!email || !password) return;
+    setLoading(true); setError(''); setSuccess('');
+    try {
+      if (mode === 'signup') {
+        await signUpWithEmail(email, password);
+        setSuccess('Cuenta creada. Revisa tu correo para confirmar. / Account created. Check your email.');
+      } else {
+        await signInWithEmail(email, password);
+      }
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : 'Error desconocido');
+    }
+    setLoading(false);
+  };
+
+  return (
+    <div className="min-h-screen bg-[#F4F5F7] flex items-center justify-center p-4">
+      <style>{`@import url('https://fonts.googleapis.com/css2?family=Syne:wght@700;800&family=DM+Sans:wght@400;500;600&display=swap'); body { font-family: 'DM Sans', sans-serif; }`}</style>
+      <div className="w-full max-w-sm">
+        <div className="flex items-center gap-2.5 justify-center mb-8">
+          <div className="w-10 h-10 bg-[#6366f1] rounded-xl flex items-center justify-center shadow-lg shadow-indigo-200">
+            <TrendingUp className="text-white" size={20} />
+          </div>
+          <h1 className="text-2xl font-bold tracking-tight" style={{ fontFamily: 'Syne, sans-serif' }}>GetFlowFi</h1>
+        </div>
+        <div className="bg-white rounded-[20px] border border-black/[0.06] shadow-sm p-6 flex flex-col gap-4">
+          <h2 className="text-lg font-semibold text-center">{mode === 'signin' ? 'Iniciar sesión / Sign in' : 'Crear cuenta / Sign up'}</h2>
+          <input
+            type="email" placeholder="Email" value={email} onChange={e => setEmail(e.target.value)}
+            className="w-full bg-zinc-50 border border-zinc-200 rounded-2xl py-3 px-4 text-sm outline-none focus:ring-2 focus:ring-indigo-300"
+          />
+          <input
+            type="password" placeholder={mode === 'signin' ? 'Contraseña / Password' : 'Contraseña (mín. 6 caracteres)'} value={password} onChange={e => setPassword(e.target.value)}
+            onKeyDown={e => e.key === 'Enter' && handle()}
+            className="w-full bg-zinc-50 border border-zinc-200 rounded-2xl py-3 px-4 text-sm outline-none focus:ring-2 focus:ring-indigo-300"
+          />
+          {error && <p className="text-red-500 text-xs text-center">{error}</p>}
+          {success && <p className="text-green-600 text-xs text-center">{success}</p>}
+          <button onClick={handle} disabled={loading}
+            className="w-full bg-[#6366f1] text-white py-3 rounded-2xl font-semibold text-sm hover:bg-indigo-700 transition-all shadow-md shadow-indigo-200 disabled:opacity-60">
+            {loading ? '...' : mode === 'signin' ? 'Entrar' : 'Crear cuenta'}
+          </button>
+          <button onClick={() => { setMode(m => m === 'signin' ? 'signup' : 'signin'); setError(''); setSuccess(''); }}
+            className="text-xs text-zinc-500 hover:text-indigo-600 transition-colors text-center">
+            {mode === 'signin' ? '¿No tienes cuenta? Crear una / No account? Sign up' : '¿Ya tienes cuenta? Iniciar sesión / Sign in'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ─── ALLOCATION MODAL ─────────────────────────────────────────────────────────
 function AllocationModal({ income, budgetPlan, lang, onComplete, onClose }: {
   income: { amount: number; description: string };
@@ -364,7 +451,7 @@ function AllocationModal({ income, budgetPlan, lang, onComplete, onClose }: {
     return init;
   });
 
-  const totalAllocated = Object.values(allocations).reduce((a, b) => a + b, 0);
+  const totalAllocated = Object.values(allocations).reduce<number>((a, b) => a + (b as number), 0);
   const remaining = income.amount - totalAllocated;
   const pctAllocated = Math.round((totalAllocated / income.amount) * 100);
 
@@ -650,11 +737,15 @@ function BudgetOnboardingChat({ lang, onComplete, onClose }: {
 // ─── MAIN APP ─────────────────────────────────────────────────────────────────
 export default function App() {
   const [lang, setLang] = useLocalStorage<Lang>('ff_lang', 'es');
-  const [transactions, setTransactions] = useLocalStorage<Transaction[]>('ff_transactions', INITIAL_TRANSACTIONS);
-  const [goals, setGoals] = useLocalStorage<SavingGoal[]>('ff_goals', INITIAL_GOALS);
-  const [budgets, setBudgets] = useLocalStorage<BudgetLimit[]>('ff_budgets', INITIAL_BUDGETS);
-  const [budgetPlan, setBudgetPlan] = useLocalStorage<BudgetPlan>('ff_budget_plan', INITIAL_BUDGET_PLAN);
-  const [incomeRecords, setIncomeRecords] = useLocalStorage<IncomeRecord[]>('ff_income_records', INITIAL_INCOME_RECORDS);
+  // Auth
+  const [userId, setUserId] = useState<string | null>(null);
+  const [authLoading, setAuthLoading] = useState(true);
+  // Data — loaded from Supabase once authenticated
+  const [transactions, setTransactions] = useState<Transaction[]>([]);
+  const [goals, setGoals] = useState<SavingGoal[]>([]);
+  const [budgets, setBudgets] = useState<BudgetLimit[]>([]); // legacy — kept to avoid JSX breaks, not synced to DB
+  const [budgetPlan, setBudgetPlan] = useState<BudgetPlan>(INITIAL_BUDGET_PLAN);
+  const [incomeRecords, setIncomeRecords] = useState<IncomeRecord[]>([]);
   const [activeView, setActiveView] = useState<View>('dashboard');
   const [modalMode, setModalMode] = useState<ModalMode>('closed');
   const [editingTransaction, setEditingTransaction] = useState<Transaction | null>(null);
@@ -674,20 +765,48 @@ export default function App() {
   const [goalForm, setGoalForm] = useState({ name: '', targetAmount: '', currentAmount: '', deadline: '', emoji: '🎯', color: GOAL_COLORS[0] });
   const [budgetForm, setBudgetForm] = useState({ category: '', limit: '', period: 'monthly' as 'monthly' | 'weekly' });
 
-  // Monthly reset check
+  // ── Auth: listen for sign-in / sign-out ──
   useEffect(() => {
-    if (budgetPlan.currentMonth !== currentMonthKey) {
-      setIncomeRecords([]);
-      setBudgetPlan(prev => ({ ...prev, currentMonth: currentMonthKey }));
-    }
+    const { data: { subscription } } = onAuthStateChange((id) => {
+      setUserId(id);
+      setAuthLoading(false);
+    });
+    return () => subscription.unsubscribe();
   }, []);
+
+  // ── Data: load from Supabase whenever userId changes ──
+  useEffect(() => {
+    if (!userId) return;
+    (async () => {
+      await migrateLocalStorageToSupabase(userId);
+      const [txs, gls, plan, income] = await Promise.all([
+        fetchTransactions(userId),
+        fetchGoals(userId),
+        fetchBudgetPlan(userId),
+        fetchIncomeRecords(userId, currentMonthKey),
+      ]);
+      setTransactions(txs.map(dbRowToTransaction));
+      setGoals(gls.map(dbRowToGoal));
+      if (plan) setBudgetPlan(dbRowToBudgetPlan(plan));
+      setIncomeRecords(income.map(dbRowToIncomeRecord));
+    })();
+  }, [userId]);
+
+  // ── Monthly reset: new month → clear income records state + update budgetPlan ──
+  useEffect(() => {
+    if (!userId || budgetPlan.currentMonth === currentMonthKey) return;
+    setIncomeRecords([]);
+    const updated: BudgetPlan = { ...budgetPlan, currentMonth: currentMonthKey };
+    setBudgetPlan(updated);
+    upsertBudgetPlan(userId, { income: updated.income, frequency: updated.frequency, budgets: updated.budgets, setup_done: updated.setupDone, current_month: updated.currentMonth });
+  }, [userId]);
 
   // Computed: allocated budget per category from income records this month
   const allocatedBudgets = useMemo(() => {
     const alloc: Record<string, number> = {};
     ALL_BUDGET_DESTINATIONS.forEach(d => { alloc[d.id] = 0; });
     incomeRecords.filter(r => r.distributed).forEach(r => {
-      Object.entries(r.allocations).forEach(([k, v]) => { alloc[k] = (alloc[k] || 0) + v; });
+      Object.entries(r.allocations).forEach(([k, v]) => { alloc[k] = (alloc[k] || 0) + (v as number); });
     });
     return alloc;
   }, [incomeRecords]);
@@ -778,24 +897,27 @@ export default function App() {
     setModalMode('edit-form');
   };
 
-  const handleSaveTransaction = (type: 'income' | 'expense' | 'saving') => {
-    if (!form.amount || !form.category) return;
+  const handleSaveTransaction = async (type: 'income' | 'expense' | 'saving') => {
+    if (!form.amount || !form.category || !userId) return;
     const amount = parseFloat(form.amount);
+    const txFields = { amount, category: form.category, date: form.date, description: form.description };
 
     if (editingTransaction) {
-      setTransactions(prev => prev.map(tx => tx.id === editingTransaction.id
-        ? { ...tx, amount, category: form.category, date: form.date, description: form.description }
-        : tx));
+      // Optimistic update then sync
+      setTransactions(prev => prev.map(tx => tx.id === editingTransaction.id ? { ...tx, ...txFields } : tx));
+      await updateTransaction(editingTransaction.id, txFields);
     } else {
-      setTransactions(prev => [{ id: Date.now().toString(), amount, category: form.category, date: form.date, description: form.description, type }, ...prev]);
+      const newId = crypto.randomUUID();
+      const newTx: Transaction = { id: newId, ...txFields, type };
+      setTransactions(prev => [newTx, ...prev]);
+      await saveTransaction(userId, { id: newId, ...txFields, type });
 
-      // If income, also create an income record and open allocation
+      // If income, create an income record and open allocation modal
       if (type === 'income') {
-        const newIncRecord: IncomeRecord = {
-          id: 'inc_' + Date.now(), amount, date: form.date,
-          description: form.description || form.category, distributed: false, allocations: {},
-        };
+        const incId = crypto.randomUUID();
+        const newIncRecord: IncomeRecord = { id: incId, amount, date: form.date, description: form.description || form.category, distributed: false, allocations: {} };
         setIncomeRecords(prev => [...prev, newIncRecord]);
+        await saveIncomeRecord(userId, { id: incId, amount, date: form.date, description: form.description || form.category, distributed: false, allocations: {} });
         setModalMode('closed');
         setTimeout(() => {
           setAllocatingIncome({ amount, description: form.description || form.category });
@@ -807,18 +929,22 @@ export default function App() {
     setModalMode('closed');
   };
 
-  const handleDelete = (id: string) => {
+  const handleDelete = async (id: string) => {
     setTransactions(prev => prev.filter(tx => tx.id !== id));
     setDeleteConfirm(null);
+    await deleteTransaction(id);
   };
 
-  const handleSaveGoal = () => {
-    if (!goalForm.name || !goalForm.targetAmount) return;
+  const handleSaveGoal = async () => {
+    if (!goalForm.name || !goalForm.targetAmount || !userId) return;
     const goalData = { name: goalForm.name, targetAmount: parseFloat(goalForm.targetAmount), currentAmount: parseFloat(goalForm.currentAmount || '0'), deadline: goalForm.deadline, emoji: goalForm.emoji, color: goalForm.color };
     if (editingGoal) {
       setGoals(prev => prev.map(g => g.id === editingGoal.id ? { ...g, ...goalData } : g));
+      await updateGoal(editingGoal.id, { name: goalData.name, target_amount: goalData.targetAmount, current_amount: goalData.currentAmount, deadline: goalData.deadline, emoji: goalData.emoji, color: goalData.color });
     } else {
-      setGoals(prev => [...prev, { id: Date.now().toString(), ...goalData }]);
+      const newId = crypto.randomUUID();
+      setGoals(prev => [...prev, { id: newId, ...goalData }]);
+      await saveGoal(userId, { id: newId, name: goalData.name, target_amount: goalData.targetAmount, current_amount: goalData.currentAmount, deadline: goalData.deadline, emoji: goalData.emoji, color: goalData.color });
     }
     setModalMode('closed');
     setEditingGoal(null);
@@ -831,31 +957,37 @@ export default function App() {
     setBudgetForm({ category: '', limit: '', period: 'monthly' });
   };
 
-  const handleAllocationComplete = (allocs: Record<string, number>) => {
-    // Mark the last undistributed income as distributed
+  const handleAllocationComplete = async (allocs: Record<string, number>) => {
+    const record = incomeRecords.find(r => !r.distributed);
     setIncomeRecords(prev => {
       const updated = [...prev];
       const idx = updated.findIndex(r => !r.distributed);
-      if (idx >= 0) {
-        updated[idx] = { ...updated[idx], distributed: true, allocations: allocs };
-      }
+      if (idx >= 0) updated[idx] = { ...updated[idx], distributed: true, allocations: allocs };
       return updated;
     });
+    if (record && userId) {
+      await updateIncomeRecord(record.id, { distributed: true, allocations: allocs });
+    }
     setAllocatingIncome(null);
     setModalMode('closed');
   };
 
-  const handleBudgetPlanUpdate = (newPlan: BudgetPlan) => {
+  const handleBudgetPlanUpdate = async (newPlan: BudgetPlan) => {
     setBudgetPlan(newPlan);
+    if (userId) {
+      await upsertBudgetPlan(userId, { income: newPlan.income, frequency: newPlan.frequency, budgets: newPlan.budgets, setup_done: newPlan.setupDone, current_month: newPlan.currentMonth });
+    }
     setModalMode('closed');
   };
 
-  // Editable distribution guide handler
-  const updateBudgetPlanAmount = (catId: string, newAmount: number) => {
-    setBudgetPlan(prev => ({
-      ...prev,
-      budgets: { ...prev.budgets, [catId]: newAmount },
-    }));
+  // Editable distribution guide — sync to DB after change
+  const updateBudgetPlanAmount = async (catId: string, newAmount: number) => {
+    const updated = (prev: BudgetPlan) => ({ ...prev, budgets: { ...prev.budgets, [catId]: newAmount } });
+    setBudgetPlan(prev => updated(prev));
+    if (userId) {
+      const next = updated(budgetPlan);
+      await upsertBudgetPlan(userId, { income: next.income, frequency: next.frequency, budgets: next.budgets, setup_done: next.setupDone, current_month: next.currentMonth });
+    }
   };
 
   const handleAIInsights = useCallback(async () => {
@@ -889,13 +1021,21 @@ export default function App() {
   }, [activeView, categoryData, filteredTransactions]);
 
   // Budget page data
-  const totalBudgetPlan = Object.values(budgetPlan.budgets).reduce((a, b) => a + b, 0);
+  const totalBudgetPlan = Object.values(budgetPlan.budgets).reduce<number>((a, b) => a + (b as number), 0);
   const periods = budgetPlan.frequency === 'quincenal' ? 2 : budgetPlan.frequency === 'semanal' ? 4 : 1;
   const periodLabels = budgetPlan.frequency === 'quincenal'
     ? ['Q1 ($ Del 30)', 'Q2 ($ Del 15)']
     : budgetPlan.frequency === 'semanal'
     ? ['Sem 1', 'Sem 2', 'Sem 3', 'Sem 4']
     : [lang === 'es' ? 'Mensual' : 'Monthly'];
+
+  // Auth gate — show loading or login before the main app
+  if (authLoading) return (
+    <div className="min-h-screen bg-[#F4F5F7] flex items-center justify-center">
+      <div className="w-10 h-10 border-4 border-indigo-200 border-t-indigo-600 rounded-full animate-spin" />
+    </div>
+  );
+  if (!userId) return <LoginScreen />;
 
   return (
     <div className="min-h-screen bg-[#F4F5F7] flex text-[#0f0f0f] font-sans">
@@ -1184,7 +1324,7 @@ export default function App() {
                         {goals.slice(0, 4).map(g => (
                           <GoalCard key={g.id} goal={g} progressLabel={t.progress} completedLabel={t.completed}
                             onEdit={() => { setEditingGoal(g); setGoalForm({ name: g.name, targetAmount: g.targetAmount.toString(), currentAmount: g.currentAmount.toString(), deadline: g.deadline, emoji: g.emoji, color: g.color }); setModalMode('goal-form'); }}
-                            onDelete={() => setGoals(prev => prev.filter(x => x.id !== g.id))} />
+                            onDelete={() => { setGoals(prev => prev.filter(x => x.id !== g.id)); deleteGoal(g.id); }} />
                         ))}
                       </div>
                     </div>
@@ -1253,7 +1393,7 @@ export default function App() {
                           {goals.map(g => (
                             <GoalCard key={g.id} goal={g} progressLabel={t.progress} completedLabel={t.completed}
                               onEdit={() => { setEditingGoal(g); setGoalForm({ name: g.name, targetAmount: g.targetAmount.toString(), currentAmount: g.currentAmount.toString(), deadline: g.deadline, emoji: g.emoji, color: g.color }); setModalMode('goal-form'); }}
-                              onDelete={() => setGoals(prev => prev.filter(x => x.id !== g.id))} />
+                              onDelete={() => { setGoals(prev => prev.filter(x => x.id !== g.id)); deleteGoal(g.id); }} />
                           ))}
                         </div>
                       ) : (
@@ -1739,7 +1879,7 @@ function StatCard({ label, value, icon: Icon, accent, bg, active, onClick }: { l
   );
 }
 
-function TxRow({ tx, onEdit, onDelete }: { tx: Transaction; onEdit: (tx: Transaction) => void; onDelete: (id: string) => void }) {
+function TxRow({ tx, onEdit, onDelete }: { key?: React.Key; tx: Transaction; onEdit: (tx: Transaction) => void; onDelete: (id: string) => void }) {
   const color = tx.type === 'income' ? '#10b981' : tx.type === 'expense' ? '#ef4444' : '#6366f1';
   const bg = tx.type === 'income' ? '#f0fdf4' : tx.type === 'expense' ? '#fef2f2' : '#eef2ff';
   return (
@@ -1761,7 +1901,7 @@ function TxRow({ tx, onEdit, onDelete }: { tx: Transaction; onEdit: (tx: Transac
   );
 }
 
-function GoalCard({ goal, onEdit, onDelete, progressLabel, completedLabel }: { goal: SavingGoal; onEdit: () => void; onDelete: () => void; progressLabel: string; completedLabel: string }) {
+function GoalCard({ goal, onEdit, onDelete, progressLabel, completedLabel }: { key?: React.Key; goal: SavingGoal; onEdit: () => void; onDelete: () => void; progressLabel: string; completedLabel: string }) {
   const pct = Math.min((goal.currentAmount / goal.targetAmount) * 100, 100);
   const done = pct >= 100;
   return (
