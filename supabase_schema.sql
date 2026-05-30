@@ -112,3 +112,11 @@ CREATE POLICY "Users manage own income records"
   ON income_records FOR ALL
   USING (auth.uid() = user_id)
   WITH CHECK (auth.uid() = user_id);
+
+-- ─── GRANTS ───────────────────────────────────────────────────────────────────
+-- Required when tables are created via raw SQL (not the Supabase UI dashboard).
+-- Without these, authenticated users get 403 Forbidden on all operations.
+GRANT SELECT, INSERT, UPDATE, DELETE ON public.transactions   TO authenticated;
+GRANT SELECT, INSERT, UPDATE, DELETE ON public.saving_goals   TO authenticated;
+GRANT SELECT, INSERT, UPDATE, DELETE ON public.budget_plan    TO authenticated;
+GRANT SELECT, INSERT, UPDATE, DELETE ON public.income_records TO authenticated;
