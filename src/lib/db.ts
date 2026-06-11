@@ -36,9 +36,9 @@ export async function signOut() {
   if (error) throw error;
 }
 
-export function onAuthStateChange(callback: (userId: string | null) => void) {
+export function onAuthStateChange(callback: (userId: string | null, email: string | null) => void) {
   return supabase.auth.onAuthStateChange((_event, session) => {
-    callback(session?.user?.id ?? null);
+    callback(session?.user?.id ?? null, session?.user?.email ?? null);
   });
 }
 
