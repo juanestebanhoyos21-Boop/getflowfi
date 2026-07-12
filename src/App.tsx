@@ -63,7 +63,9 @@ interface BudgetPlan {
   currentMonth: string; // sin uso — se limpia junto con la DB en Fase 5
 }
 
-// ─── NEW BUDGET CATEGORIES ────────────────────────────────────────────────────
+// ─── CATEGORIES ───────────────────────────────────────────────────────────────
+// Las transacciones guardan SIEMPRE el `id` (nunca la etiqueta visible).
+// La etiqueta se resuelve al mostrar según el idioma activo.
 const EXPENSE_CATEGORIES = [
   { id: 'transporte', es: 'Transporte', en: 'Transportation', icon: Car, group: 'necesidades' },
   { id: 'salidas', es: 'Salidas', en: 'Going Out', icon: Utensils, group: 'caprichos' },
@@ -74,6 +76,26 @@ const EXPENSE_CATEGORIES = [
   { id: 'suscripciones', es: 'Suscripciones', en: 'Subscriptions', icon: Smartphone, group: 'necesidades' },
   { id: 'gastos_hogar', es: 'Gastos Hogar', en: 'Home Expenses', icon: Home, group: 'necesidades' },
 ];
+
+const INCOME_CATEGORIES = [
+  { id: 'salario', es: 'Salario', en: 'Salary', icon: Briefcase },
+  { id: 'freelance', es: 'Freelance', en: 'Freelance', icon: Briefcase },
+  { id: 'inversion', es: 'Inversión', en: 'Investment', icon: TrendingUp },
+  { id: 'regalo', es: 'Regalo', en: 'Gift', icon: Gift },
+  { id: 'negocio', es: 'Negocio', en: 'Business', icon: Briefcase },
+  { id: 'otros_ingresos', es: 'Otros', en: 'Other', icon: Wallet },
+];
+
+const ALL_CATEGORIES = [...EXPENSE_CATEGORIES, ...INCOME_CATEGORIES];
+
+function catById(id: string) {
+  return ALL_CATEGORIES.find(c => c.id === id);
+}
+
+// Fallback: filas viejas (pre-migración) pueden traer la etiqueta como texto libre.
+function categoryLabel(id: string, lang: Lang): string {
+  return catById(id)?.[lang] ?? id;
+}
 
 
 // ─── i18n ─────────────────────────────────────────────────────────────────────
@@ -108,9 +130,6 @@ const T = {
     progress: 'Progreso', confirmDelete: '¿Eliminar esta transacción?',
     months: ['Ene','Feb','Mar','Abr','May','Jun','Jul','Ago','Sep','Oct','Nov','Dic'],
     fullMonths: ['Enero','Febrero','Marzo','Abril','Mayo','Junio','Julio','Agosto','Septiembre','Octubre','Noviembre','Diciembre'],
-    incomeCategories: ['Salario','Freelance','Inversión','Regalo','Negocio','Otros'],
-    expenseCategories: ['Transporte','Salidas','Viajes','Gastos Personales','Imprevistos / Otros','Salud','Suscripciones','Gastos Hogar'],
-    savingCategories: ['Ahorro General','Inversión','Fondo de Emergencia'],
     // New budget strings
     distributeIncome: 'Distribuir Ingreso',
     allocated: 'asignado',
@@ -170,9 +189,6 @@ const T = {
     progress: 'Progress', confirmDelete: 'Delete this transaction?',
     months: ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'],
     fullMonths: ['January','February','March','April','May','June','July','August','September','October','November','December'],
-    incomeCategories: ['Salary','Freelance','Investment','Gift','Business','Other'],
-    expenseCategories: ['Transportation','Going Out','Travel','Personal','Unexpected / Other','Health','Subscriptions','Home Expenses'],
-    savingCategories: ['General Savings','Investment','Emergency Fund'],
     // New budget strings
     distributeIncome: 'Distribute Income',
     allocated: 'allocated',
@@ -256,6 +272,13 @@ function getCategoryIcon(category: string, size = 16) {
   if (c.includes('fondo') || c.includes('fund') || c.includes('emergencia')) return <Shield size={size} />;
   if (c.includes('ahorro') || c.includes('saving') || c.includes('jubilación') || c.includes('retirement')) return <PiggyBank size={size} />;
   return <Wallet size={size} />;
+}
+
+// Ícono por ID de categoría; si es texto libre viejo, cae al matcher por keywords.
+function getCategoryVisual(catId: string, size = 16) {
+  const cat = catById(catId);
+  if (cat) { const Icon = cat.icon; return <Icon size={size} />; }
+  return getCategoryIcon(catId, size);
 }
 
 // ─── HELPERS ──────────────────────────────────────────────────────────────────
@@ -426,7 +449,8 @@ export default function App() {
     const spent: Record<string, number> = {};
     EXPENSE_CATEGORIES.forEach(c => { spent[c.id] = 0; });
     filteredByPeriod.filter(tx => tx.type === 'expense').forEach(tx => {
-      const matchedCat = EXPENSE_CATEGORIES.find(c => c.es === tx.category || c.en === tx.category);
+      // Match por ID (modelo actual); etiquetas es/en cubren filas pre-migración
+      const matchedCat = EXPENSE_CATEGORIES.find(c => c.id === tx.category || c.es === tx.category || c.en === tx.category);
       if (matchedCat) {
         spent[matchedCat.id] = (spent[matchedCat.id] || 0) + tx.amount;
       }
@@ -466,16 +490,17 @@ export default function App() {
   const categoryData = useMemo(() => {
     const map: Record<string, number> = {};
     filteredByPeriod.filter(tx => tx.type === 'expense').forEach(tx => {
-      map[tx.category] = (map[tx.category] || 0) + tx.amount;
+      const label = categoryLabel(tx.category, lang);
+      map[label] = (map[label] || 0) + tx.amount;
     });
     return Object.entries(map).map(([name, value]) => ({ name, value })).sort((a, b) => b.value - a.value);
-  }, [filteredByPeriod]);
+  }, [filteredByPeriod, lang]);
 
   // Handlers
   const openAdd = (type: 'income' | 'expense') => {
     setEditingTransaction(null);
-    const cats = type === 'income' ? t.incomeCategories : t.expenseCategories;
-    setForm({ amount: '', category: cats[0], date: new Date().toISOString().split('T')[0], description: '' });
+    const cats = type === 'income' ? INCOME_CATEGORIES : EXPENSE_CATEGORIES;
+    setForm({ amount: '', category: cats[0].id, date: new Date().toISOString().split('T')[0], description: '' });
     setModalMode(`${type}-form` as ModalMode);
   };
 
@@ -542,14 +567,17 @@ export default function App() {
   };
 
   const currentTypeForForm: 'income' | 'expense' = modalMode === 'income-form' ? 'income' : modalMode === 'expense-form' ? 'expense' : (editingTransaction?.type || 'income');
-  const formCats = currentTypeForForm === 'income' ? t.incomeCategories : t.expenseCategories;
+  const formCats = currentTypeForForm === 'income' ? INCOME_CATEGORIES : EXPENSE_CATEGORIES;
 
   const pieData = useMemo(() => {
     if (activeView === 'expenses') return categoryData;
     const map: Record<string, number> = {};
-    filteredTransactions.forEach(tx => { map[tx.category] = (map[tx.category] || 0) + tx.amount; });
+    filteredTransactions.forEach(tx => {
+      const label = categoryLabel(tx.category, lang);
+      map[label] = (map[label] || 0) + tx.amount;
+    });
     return Object.entries(map).map(([name, value]) => ({ name, value })).sort((a, b) => b.value - a.value);
-  }, [activeView, categoryData, filteredTransactions]);
+  }, [activeView, categoryData, filteredTransactions, lang]);
 
   // Auth gate — show loading or login before the main app
   if (authLoading) return (
@@ -779,7 +807,7 @@ export default function App() {
                       {!showAllTx ? (
                         <div className="space-y-1">
                           {filteredByPeriod.sort((a,b) => new Date(b.date).getTime() - new Date(a.date).getTime()).slice(0, 5).map(tx => (
-                            <TxRow key={tx.id} tx={tx} onEdit={openEdit} onDelete={id => setDeleteConfirm(id)} />
+                            <TxRow key={tx.id} tx={tx} lang={lang} onEdit={openEdit} onDelete={id => setDeleteConfirm(id)} />
                           ))}
                           {filteredByPeriod.length === 0 && <EmptyState label={t.noTransactions} desc={t.noTransactionsDesc} onAdd={() => setModalMode('selection')} btnLabel={t.addNow} />}
                         </div>
@@ -798,7 +826,7 @@ export default function App() {
                                   <span className="text-xs font-bold" style={{ color: typeColor }}>{type === 'income' ? '+' : '-'}{fmtCOP(typeTotal)}</span>
                                 </div>
                                 {typeTxs.map(tx => (
-                                  <TxRow key={tx.id} tx={tx} onEdit={openEdit} onDelete={id => setDeleteConfirm(id)} />
+                                  <TxRow key={tx.id} tx={tx} lang={lang} onEdit={openEdit} onDelete={id => setDeleteConfirm(id)} />
                                 ))}
                               </div>
                             );
@@ -882,7 +910,7 @@ export default function App() {
                     <div className="p-4 space-y-1">
                       {filteredTransactions.length > 0
                         ? filteredTransactions.map(tx => (
-                            <TxRow key={tx.id} tx={tx} onEdit={openEdit} onDelete={id => setDeleteConfirm(id)} />
+                            <TxRow key={tx.id} tx={tx} lang={lang} onEdit={openEdit} onDelete={id => setDeleteConfirm(id)} />
                           ))
                         : <EmptyState label={t.noRecords} desc={t.noRecordsDesc} onAdd={() => openAdd(activeView === 'income' ? 'income' : 'expense')} btnLabel={t.createFirst} />}
                     </div>
@@ -1050,7 +1078,9 @@ export default function App() {
                       <label className="block text-xs font-bold text-zinc-400 uppercase tracking-wider mb-1.5">{t.category}</label>
                       <select value={form.category} onChange={e => setForm(f => ({ ...f, category: e.target.value }))}
                         className="w-full bg-zinc-50 border border-zinc-200 rounded-2xl py-3 px-3 font-medium focus:ring-2 focus:ring-indigo-300 outline-none text-sm">
-                        {formCats.map(c => <option key={c} value={c}>{c}</option>)}
+                        {/* Transacción vieja con categoría de texto libre: se muestra tal cual hasta que el usuario elija una del listado */}
+                        {form.category && !catById(form.category) && <option value={form.category}>{form.category}</option>}
+                        {formCats.map(c => <option key={c.id} value={c.id}>{c[lang]}</option>)}
                       </select>
                     </div>
                     <div>
@@ -1164,14 +1194,14 @@ function StatCard({ label, value, icon: Icon, accent, bg, active, onClick }: { l
   );
 }
 
-function TxRow({ tx, onEdit, onDelete }: { key?: React.Key; tx: Transaction; onEdit: (tx: Transaction) => void; onDelete: (id: string) => void }) {
+function TxRow({ tx, lang, onEdit, onDelete }: { key?: React.Key; tx: Transaction; lang: Lang; onEdit: (tx: Transaction) => void; onDelete: (id: string) => void }) {
   const color = tx.type === 'income' ? '#10b981' : '#ef4444';
   const bg = tx.type === 'income' ? '#f0fdf4' : '#fef2f2';
   return (
     <div className="flex items-center gap-3 p-2.5 rounded-2xl hover:bg-zinc-50 group transition-all">
-      <div className="w-9 h-9 rounded-xl flex items-center justify-center flex-shrink-0" style={{ background: bg, color }}>{getCategoryIcon(tx.category)}</div>
+      <div className="w-9 h-9 rounded-xl flex items-center justify-center flex-shrink-0" style={{ background: bg, color }}>{getCategoryVisual(tx.category)}</div>
       <div className="flex-1 min-w-0">
-        <p className="font-semibold text-sm truncate">{tx.category}</p>
+        <p className="font-semibold text-sm truncate">{categoryLabel(tx.category, lang)}</p>
         <p className="text-xs text-zinc-400 truncate">{tx.description || '—'}</p>
       </div>
       <div className="text-right flex-shrink-0">

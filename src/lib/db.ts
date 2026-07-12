@@ -10,7 +10,7 @@
 //   upsert*  → INSERT ... ON CONFLICT UPDATE
 
 import { supabase } from './supabase';
-import type { TxRow, GoalRow, BudgetRow, IncomeRow } from './database.types';
+import type { TxRow, GoalRow, BudgetRow } from './database.types';
 
 // ─── AUTH ─────────────────────────────────────────────────────────────────────
 
@@ -162,57 +162,8 @@ export async function upsertBudgetPlan(
   return data;
 }
 
-// ─── INCOME RECORDS ───────────────────────────────────────────────────────────
-
-export async function fetchIncomeRecords(
-  userId: string,
-  month: string // 'YYYY-MM'
-): Promise<IncomeRow[]> {
-  const { data, error } = await supabase
-    .from('income_records')
-    .select('*')
-    .eq('user_id', userId)
-    .gte('date', `${month}-01`)
-    .lt('date', nextMonth(month))
-    .order('date', { ascending: false });
-  if (error) throw error;
-  return data;
-}
-
-export async function saveIncomeRecord(
-  userId: string,
-  record: Omit<IncomeRow, 'user_id' | 'created_at'>
-): Promise<IncomeRow> {
-  const { data, error } = await supabase
-    .from('income_records')
-    .insert({ ...record, user_id: userId })
-    .select()
-    .single();
-  if (error) throw error;
-  return data;
-}
-
-export async function updateIncomeRecord(
-  recordId: string,
-  updates: Partial<Omit<IncomeRow, 'id' | 'user_id' | 'created_at'>>
-): Promise<IncomeRow> {
-  const { data, error } = await supabase
-    .from('income_records')
-    .update(updates)
-    .eq('id', recordId)
-    .select()
-    .single();
-  if (error) throw error;
-  return data;
-}
-
-export async function deleteIncomeRecord(recordId: string): Promise<void> {
-  const { error } = await supabase
-    .from('income_records')
-    .delete()
-    .eq('id', recordId);
-  if (error) throw error;
-}
+// income_records: sin CRUD — la tabla solo se conserva hasta el drop de Fase 5.
+// La migración de localStorage (abajo) aún escribe en ella para no perder datos viejos.
 
 // ─── MIGRATION: localStorage → Supabase ───────────────────────────────────────
 // Called once on first sign-in if the user has existing localStorage data.
@@ -302,12 +253,4 @@ export async function migrateLocalStorageToSupabase(userId: string): Promise<voi
 
   // Mark as migrated so this never runs again
   localStorage.setItem(LS_KEYS.migrated, 'true');
-}
-
-// ─── HELPERS ──────────────────────────────────────────────────────────────────
-
-function nextMonth(month: string): string {
-  const [year, m] = month.split('-').map(Number);
-  if (m === 12) return `${year + 1}-01-01`;
-  return `${year}-${String(m + 1).padStart(2, '0')}-01`;
 }
