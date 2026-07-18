@@ -442,8 +442,10 @@ export default function App() {
       setGoals(gls.map(dbRowToGoal));
       const loadedPlan = plan ? dbRowToBudgetPlan(plan) : EMPTY_BUDGET_PLAN;
       setBudgetPlan(loadedPlan);
-      // Prompt de setup al login: solo si nunca configuró y nunca lo saltó (siempre saltable)
-      if (!loadedPlan.setupDone && !localStorage.getItem(`ff_budget_setup_dismissed_${userId}`)) {
+      // Prompt de setup al login: solo si no hay ningún monto configurado y nunca lo saltó (siempre saltable).
+      // Se mira budgets (no setupDone): vaciar todos los montos vuelve a contar como "sin configurar".
+      const loadedHasBudget = Object.values(loadedPlan.budgets).some(v => v > 0);
+      if (!loadedHasBudget && !localStorage.getItem(`ff_budget_setup_dismissed_${userId}`)) {
         openBudgetSetup(loadedPlan);
       }
     })();
@@ -468,6 +470,10 @@ export default function App() {
   const totalBalance = useMemo(() => {
     return transactions.reduce((a, tx) => a + (tx.type === 'income' ? tx.amount : -tx.amount), 0);
   }, [transactions]);
+
+  // "Presupuesto configurado" = hay al menos un monto > 0 (no el flag setupDone:
+  // vaciar todos los montos vuelve a mostrar el CTA de setup)
+  const hasBudget = useMemo(() => Object.values(budgetPlan.budgets).some((v: number) => v > 0), [budgetPlan.budgets]);
 
   // Gastado por categoría en el período seleccionado (vs presupuesto mensual)
   const spentPerCategory = useMemo(() => {
@@ -603,7 +609,7 @@ export default function App() {
       const n = parseInt(setupForm[c.id] || '') || 0;
       if (n > 0) budgets[c.id] = n;
     });
-    const next: BudgetPlan = { ...budgetPlan, income: parseInt(setupIncome) || 0, budgets, setupDone: true };
+    const next: BudgetPlan = { ...budgetPlan, income: parseInt(setupIncome) || 0, budgets, setupDone: Object.keys(budgets).length > 0 };
     setBudgetPlan(next);
     setModalMode('closed');
     await upsertBudgetPlan(userId, { income: next.income, frequency: next.frequency, budgets: next.budgets, setup_done: next.setupDone, current_month: next.currentMonth });
@@ -615,9 +621,11 @@ export default function App() {
     setModalMode('closed');
   };
 
-  // Editar el presupuesto mensual de una categoría — sync a Supabase
+  // Editar el presupuesto mensual de una categoría — sync a Supabase.
+  // setupDone refleja si queda algún monto > 0: vaciar todo = volver a "sin configurar".
   const updateBudgetPlanAmount = async (catId: string, newAmount: number) => {
-    const next: BudgetPlan = { ...budgetPlan, budgets: { ...budgetPlan.budgets, [catId]: newAmount }, setupDone: true };
+    const nextBudgets = { ...budgetPlan.budgets, [catId]: newAmount };
+    const next: BudgetPlan = { ...budgetPlan, budgets: nextBudgets, setupDone: Object.values(nextBudgets).some((v: number) => v > 0) };
     setBudgetPlan(next);
     if (userId) {
       await upsertBudgetPlan(userId, { income: next.income, frequency: next.frequency, budgets: next.budgets, setup_done: next.setupDone, current_month: next.currentMonth });
@@ -795,7 +803,7 @@ export default function App() {
               {activeView === 'dashboard' && (
                 <div className="space-y-5">
                   {/* Budget overview cards on dashboard */}
-                  {budgetPlan.setupDone && (
+                  {hasBudget && (
                     <div className="card p-6">
                       <div className="flex items-center justify-between mb-4">
                         <h3 className="font-display font-bold text-base">{t.budgets}</h3>
@@ -1015,8 +1023,8 @@ export default function App() {
               {/* ── PRESUPUESTO ── monto mensual fijo por categoría, gastado del período vs presupuesto */}
               {activeView === 'budgets' && (
                 <div className="space-y-5">
-                  {/* CTA de setup: aparece mientras el usuario no haya configurado (el prompt del login es saltable) */}
-                  {!budgetPlan.setupDone && (
+                  {/* CTA de setup: aparece mientras no haya ningún monto configurado (el prompt del login es saltable) */}
+                  {!hasBudget && (
                     <div className="card p-5 flex flex-col sm:flex-row sm:items-center gap-4">
                       <div className="w-11 h-11 bg-indigo-50 text-indigo-600 rounded-xl flex items-center justify-center flex-shrink-0"><BarChart3 size={20} /></div>
                       <div className="flex-1">
