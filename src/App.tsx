@@ -34,7 +34,7 @@ function cn(...inputs: ClassValue[]) { return twMerge(clsx(inputs)); }
 // ─── TYPES ────────────────────────────────────────────────────────────────────
 type View = 'dashboard' | 'income' | 'expenses' | 'savings' | 'budgets';
 type Lang = 'es' | 'en';
-type ModalMode = 'closed' | 'selection' | 'income-form' | 'expense-form' | 'edit-form' | 'goal-form';
+type ModalMode = 'closed' | 'selection' | 'income-form' | 'expense-form' | 'edit-form' | 'goal-form' | 'budget-setup';
 
 interface Transaction {
   id: string;
@@ -158,6 +158,14 @@ const T = {
     spentOf: 'de',
     perPeriod: 'por período',
     configure: 'Configurar',
+    // Budget setup (Fase 2)
+    setupIntro: 'Define cuánto quieres gastar al mes por categoría. Deja en 0 las que no quieras controlar — puedes cambiarlo cuando quieras.',
+    monthlyIncome: 'Tu ingreso mensual (opcional)',
+    suggestFromIncome: 'Sugerir según mi ingreso',
+    suggestNote: 'Pre-llena con la regla 50/30/20: 50% necesidades, 30% caprichos, 20% queda libre para ahorro.',
+    skipForNow: 'Ahora no',
+    setupBannerTitle: '¿Configuramos tu presupuesto?',
+    setupBannerDesc: 'Toma 30 segundos: define un monto mensual por categoría y te aviso si te pasas.',
   },
   en: {
     appName: 'FinanzaFlow',
@@ -217,6 +225,14 @@ const T = {
     spentOf: 'of',
     perPeriod: 'per period',
     configure: 'Configure',
+    // Budget setup (Fase 2)
+    setupIntro: "Set how much you want to spend per month by category. Leave at 0 the ones you don't want to track — you can change it anytime.",
+    monthlyIncome: 'Your monthly income (optional)',
+    suggestFromIncome: 'Suggest from my income',
+    suggestNote: 'Pre-fills with the 50/30/20 rule: 50% needs, 30% wants, 20% left free for savings.',
+    skipForNow: 'Not now',
+    setupBannerTitle: 'Set up your budget?',
+    setupBannerDesc: "Takes 30 seconds: set a monthly amount per category and I'll warn you if you go over.",
   }
 };
 
@@ -397,6 +413,9 @@ export default function App() {
 
   const [form, setForm] = useState({ amount: '', category: '', date: new Date().toISOString().split('T')[0], description: '' });
   const [goalForm, setGoalForm] = useState({ name: '', targetAmount: '', currentAmount: '', deadline: '', emoji: '🎯', color: GOAL_COLORS[0] });
+  // Setup de presupuesto (Fase 2): montos como strings de dígitos para formatear al mostrar
+  const [setupForm, setSetupForm] = useState<Record<string, string>>({});
+  const [setupIncome, setSetupIncome] = useState('');
 
   // ── Auth: listen for sign-in / sign-out ──
   useEffect(() => {
@@ -421,8 +440,14 @@ export default function App() {
       // Transacciones 'saving' del modelo viejo quedan ocultas (no se borran de la DB)
       setTransactions(txs.filter(r => r.type !== 'saving').map(dbRowToTransaction));
       setGoals(gls.map(dbRowToGoal));
-      if (plan) setBudgetPlan(dbRowToBudgetPlan(plan));
+      const loadedPlan = plan ? dbRowToBudgetPlan(plan) : EMPTY_BUDGET_PLAN;
+      setBudgetPlan(loadedPlan);
+      // Prompt de setup al login: solo si nunca configuró y nunca lo saltó (siempre saltable)
+      if (!loadedPlan.setupDone && !localStorage.getItem(`ff_budget_setup_dismissed_${userId}`)) {
+        openBudgetSetup(loadedPlan);
+      }
     })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [userId]);
 
   // ── Período filtrado (para vistas y resúmenes del mes) ──
@@ -547,6 +572,47 @@ export default function App() {
     }
     setModalMode('closed');
     setEditingGoal(null);
+  };
+
+  // ── Setup de presupuesto (Fase 2) ──
+  const openBudgetSetup = (plan: BudgetPlan = budgetPlan) => {
+    const amounts: Record<string, string> = {};
+    EXPENSE_CATEGORIES.forEach(c => { amounts[c.id] = plan.budgets[c.id] ? String(plan.budgets[c.id]) : ''; });
+    setSetupForm(amounts);
+    setSetupIncome(plan.income ? String(plan.income) : '');
+    setModalMode('budget-setup');
+  };
+
+  // 50/30/20: 50% repartido entre necesidades, 30% entre caprichos; el 20% queda libre (ahorro)
+  const handleSuggestBudget = () => {
+    const income = parseInt(setupIncome) || 0;
+    if (income <= 0) return;
+    const needs = EXPENSE_CATEGORIES.filter(c => c.group === 'necesidades');
+    const wants = EXPENSE_CATEGORIES.filter(c => c.group === 'caprichos');
+    const round1k = (n: number) => Math.round(n / 1000) * 1000;
+    const next: Record<string, string> = {};
+    needs.forEach(c => { next[c.id] = String(round1k((income * 0.5) / needs.length)); });
+    wants.forEach(c => { next[c.id] = String(round1k((income * 0.3) / wants.length)); });
+    setSetupForm(next);
+  };
+
+  const handleSaveBudgetSetup = async () => {
+    if (!userId) return;
+    const budgets: Record<string, number> = {};
+    EXPENSE_CATEGORIES.forEach(c => {
+      const n = parseInt(setupForm[c.id] || '') || 0;
+      if (n > 0) budgets[c.id] = n;
+    });
+    const next: BudgetPlan = { ...budgetPlan, income: parseInt(setupIncome) || 0, budgets, setupDone: true };
+    setBudgetPlan(next);
+    setModalMode('closed');
+    await upsertBudgetPlan(userId, { income: next.income, frequency: next.frequency, budgets: next.budgets, setup_done: next.setupDone, current_month: next.currentMonth });
+  };
+
+  // Saltar = cerrar sin guardar y no volver a insistir en este dispositivo
+  const handleDismissSetup = () => {
+    if (userId) localStorage.setItem(`ff_budget_setup_dismissed_${userId}`, 'true');
+    setModalMode('closed');
   };
 
   // Editar el presupuesto mensual de una categoría — sync a Supabase
@@ -949,6 +1015,21 @@ export default function App() {
               {/* ── PRESUPUESTO ── monto mensual fijo por categoría, gastado del período vs presupuesto */}
               {activeView === 'budgets' && (
                 <div className="space-y-5">
+                  {/* CTA de setup: aparece mientras el usuario no haya configurado (el prompt del login es saltable) */}
+                  {!budgetPlan.setupDone && (
+                    <div className="card p-5 flex flex-col sm:flex-row sm:items-center gap-4">
+                      <div className="w-11 h-11 bg-indigo-50 text-indigo-600 rounded-xl flex items-center justify-center flex-shrink-0"><BarChart3 size={20} /></div>
+                      <div className="flex-1">
+                        <p className="font-display font-bold text-sm">{t.setupBannerTitle}</p>
+                        <p className="text-xs text-zinc-400 mt-0.5">{t.setupBannerDesc}</p>
+                      </div>
+                      <button onClick={() => openBudgetSetup()}
+                        className="bg-indigo-600 text-white px-4 py-2.5 rounded-xl text-sm font-semibold hover:bg-indigo-700 transition-all shadow-md shadow-indigo-200">
+                        {t.budgetSetup}
+                      </button>
+                    </div>
+                  )}
+
                   {/* Budget alert */}
                   {alerts.length > 0 && (
                     <div className="bg-red-50 border border-red-200 rounded-2xl p-4 flex items-start gap-3">
@@ -1033,16 +1114,16 @@ export default function App() {
       {/* ── MODALS ── */}
       <AnimatePresence>
         {modalMode !== 'closed' && (
-          <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center p-0 sm:p-4 bg-black/40 backdrop-blur-sm" onClick={() => setModalMode('closed')}>
+          <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center p-0 sm:p-4 bg-black/40 backdrop-blur-sm" onClick={() => modalMode === 'budget-setup' ? handleDismissSetup() : setModalMode('closed')}>
             <motion.div initial={{ opacity: 0, y: 50 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: 50 }} transition={{ type: 'spring', damping: 25, stiffness: 300 }}
               onClick={(e: React.MouseEvent) => e.stopPropagation()}
               className="bg-white w-full sm:max-w-md rounded-t-3xl sm:rounded-3xl p-6 shadow-2xl max-h-[90vh] overflow-y-auto scrollbar-hide">
 
               <div className="flex items-center justify-between mb-5">
                 <h3 className="font-display font-bold text-lg">
-                  {modalMode === 'selection' ? t.whatRecord : modalMode === 'income-form' ? t.registerIncome : modalMode === 'expense-form' ? t.registerExpense : modalMode === 'edit-form' ? t.edit : t.savingGoals}
+                  {modalMode === 'selection' ? t.whatRecord : modalMode === 'income-form' ? t.registerIncome : modalMode === 'expense-form' ? t.registerExpense : modalMode === 'edit-form' ? t.edit : modalMode === 'budget-setup' ? t.budgetSetup : t.savingGoals}
                 </h3>
-                <button onClick={() => setModalMode('closed')} className="p-1.5 rounded-xl hover:bg-zinc-100 text-zinc-400 transition-all"><X size={18} /></button>
+                <button onClick={() => modalMode === 'budget-setup' ? handleDismissSetup() : setModalMode('closed')} className="p-1.5 rounded-xl hover:bg-zinc-100 text-zinc-400 transition-all"><X size={18} /></button>
               </div>
 
               {/* Selection */}
@@ -1101,6 +1182,55 @@ export default function App() {
                       style={{ background: currentTypeForForm === 'income' ? '#10b981' : '#ef4444' }}>
                       {t.save}
                     </button>
+                  </div>
+                </div>
+              )}
+
+              {/* Budget Setup (Fase 2) — 8 categorías × monto mensual, siempre saltable */}
+              {modalMode === 'budget-setup' && (
+                <div className="space-y-4">
+                  <p className="text-xs text-zinc-500 -mt-2">{t.setupIntro}</p>
+
+                  <div className="bg-indigo-50/60 border border-indigo-100 rounded-2xl p-4 space-y-2">
+                    <label className="block text-xs font-bold text-zinc-400 uppercase tracking-wider">{t.monthlyIncome}</label>
+                    <div className="flex gap-2">
+                      <div className="relative flex-1">
+                        <span className="absolute left-3 top-1/2 -translate-y-1/2 text-zinc-400 text-sm">$</span>
+                        <input type="text" inputMode="numeric" placeholder="0"
+                          value={setupIncome ? Number(setupIncome).toLocaleString('es-CO') : ''}
+                          onChange={e => setSetupIncome(e.target.value.replace(/[^0-9]/g, ''))}
+                          className="w-full bg-white border border-zinc-200 rounded-xl py-2.5 pl-7 pr-3 text-sm font-bold focus:ring-2 focus:ring-indigo-300 outline-none" />
+                      </div>
+                      <button onClick={handleSuggestBudget} disabled={!setupIncome}
+                        className="px-3 py-2 rounded-xl bg-indigo-600 text-white text-xs font-semibold hover:bg-indigo-700 disabled:opacity-40 transition-all whitespace-nowrap">
+                        {t.suggestFromIncome}
+                      </button>
+                    </div>
+                    <p className="text-[11px] text-zinc-400">{t.suggestNote}</p>
+                  </div>
+
+                  <div className="space-y-2">
+                    {EXPENSE_CATEGORIES.map(cat => {
+                      const Icon = cat.icon;
+                      return (
+                        <div key={cat.id} className="flex items-center gap-3">
+                          <div className="w-8 h-8 rounded-lg bg-zinc-100 text-zinc-500 flex items-center justify-center flex-shrink-0"><Icon size={15} /></div>
+                          <span className="flex-1 text-sm font-medium truncate">{cat[lang]}</span>
+                          <div className="relative">
+                            <span className="absolute left-2 top-1/2 -translate-y-1/2 text-zinc-400 text-xs">$</span>
+                            <input type="text" inputMode="numeric" placeholder="0"
+                              value={setupForm[cat.id] ? Number(setupForm[cat.id]).toLocaleString('es-CO') : ''}
+                              onChange={e => { const digits = e.target.value.replace(/[^0-9]/g, ''); setSetupForm(f => ({ ...f, [cat.id]: digits })); }}
+                              className="w-28 bg-zinc-50 border border-zinc-200 rounded-lg py-1.5 pl-5 pr-2 text-sm font-bold text-right focus:ring-2 focus:ring-indigo-300 outline-none" />
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+
+                  <div className="flex gap-3 pt-1">
+                    <button onClick={handleDismissSetup} className="flex-1 bg-zinc-100 text-zinc-700 py-3.5 rounded-2xl font-semibold hover:bg-zinc-200 transition-all">{t.skipForNow}</button>
+                    <button onClick={handleSaveBudgetSetup} className="flex-[2] bg-indigo-600 text-white py-3.5 rounded-2xl font-bold hover:bg-indigo-700 transition-all shadow-md">{t.save}</button>
                   </div>
                 </div>
               )}
