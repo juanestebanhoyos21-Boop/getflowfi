@@ -36,10 +36,23 @@ export async function signOut() {
   if (error) throw error;
 }
 
-export function onAuthStateChange(callback: (userId: string | null, email: string | null) => void) {
-  return supabase.auth.onAuthStateChange((_event, session) => {
-    callback(session?.user?.id ?? null, session?.user?.email ?? null);
+export function onAuthStateChange(
+  callback: (userId: string | null, email: string | null, event: string) => void
+) {
+  return supabase.auth.onAuthStateChange((event, session) => {
+    callback(session?.user?.id ?? null, session?.user?.email ?? null, event);
   });
+}
+
+/**
+ * Verifica que haya una sesión viva ANTES de consultar datos.
+ * supabase-js renueva el token aquí si hace falta; si el refresh token está
+ * vencido (la app quedó suspendida > 1h) devuelve null en vez de dejar que las
+ * queries fallen en silencio contra RLS.
+ */
+export async function hasValidSession(): Promise<boolean> {
+  const { data: { session } } = await supabase.auth.getSession();
+  return !!session;
 }
 
 // ─── TRANSACTIONS ─────────────────────────────────────────────────────────────

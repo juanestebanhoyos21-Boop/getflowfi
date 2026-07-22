@@ -5,7 +5,7 @@
  * Ver PROJECT_PLAN.md en la raíz del proyecto.
  */
 
-import React, { useState, useMemo, useEffect } from 'react';
+import React, { useState, useMemo, useEffect, useCallback, useRef } from 'react';
 import {
   LayoutDashboard, ArrowUpCircle, ArrowDownCircle, PiggyBank, Plus,
   TrendingUp, Wallet, Calendar, ChevronRight, Coffee, ShoppingBag,
@@ -25,8 +25,9 @@ import {
   fetchTransactions, saveTransaction, updateTransaction, deleteTransaction,
   fetchGoals, saveGoal, updateGoal, deleteGoal,
   fetchBudgetPlan, upsertBudgetPlan,
-  migrateLocalStorageToSupabase,
+  migrateLocalStorageToSupabase, hasValidSession,
 } from './lib/db';
+import { todayLocal, parseLocalDate } from './lib/dates';
 import type { TxRow, GoalRow, BudgetRow } from './lib/database.types';
 
 function cn(...inputs: ClassValue[]) { return twMerge(clsx(inputs)); }
@@ -166,6 +167,9 @@ const T = {
     skipForNow: 'Ahora no',
     setupBannerTitle: '¿Configuramos tu presupuesto?',
     setupBannerDesc: 'Toma 30 segundos: define un monto mensual por categoría y te aviso si te pasas.',
+    errorTitle: 'Algo salió mal',
+    retry: 'Reintentar',
+    sessionExpired: 'Tu sesión expiró. Vuelve a entrar para ver tus datos.',
   },
   en: {
     appName: 'FinanzaFlow',
@@ -233,6 +237,9 @@ const T = {
     skipForNow: 'Not now',
     setupBannerTitle: 'Set up your budget?',
     setupBannerDesc: "Takes 30 seconds: set a monthly amount per category and I'll warn you if you go over.",
+    errorTitle: 'Something went wrong',
+    retry: 'Retry',
+    sessionExpired: 'Your session expired. Sign in again to see your data.',
   }
 };
 
@@ -327,7 +334,7 @@ function dbRowToBudgetPlan(row: BudgetRow): BudgetPlan {
 }
 
 // ─── LOGIN SCREEN ─────────────────────────────────────────────────────────────
-function LoginScreen() {
+function LoginScreen({ expiredNotice }: { expiredNotice?: string }) {
   const [mode, setMode] = useState<'signin' | 'signup'>('signin');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
@@ -363,6 +370,11 @@ function LoginScreen() {
         </div>
         <div className="bg-white rounded-[20px] border border-black/[0.06] shadow-sm p-6 flex flex-col gap-4">
           <h2 className="text-lg font-semibold text-center">{mode === 'signin' ? 'Iniciar sesión / Sign in' : 'Crear cuenta / Sign up'}</h2>
+          {expiredNotice && (
+            <p className="bg-amber-50 border border-amber-200 text-amber-700 text-xs rounded-xl px-3 py-2.5 text-center">
+              {expiredNotice}
+            </p>
+          )}
           <input
             type="email" placeholder="Email" value={email} onChange={e => setEmail(e.target.value)}
             className="w-full bg-zinc-50 border border-zinc-200 rounded-2xl py-3 px-4 text-sm outline-none focus:ring-2 focus:ring-indigo-300"
@@ -408,10 +420,17 @@ export default function App() {
   const [filterYear, setFilterYear] = useState(new Date().getFullYear().toString());
   const [alerts, setAlerts] = useState<string[]>([]);
   const [showAllTx, setShowAllTx] = useState(false);
+  // Errores de red/sesión: nunca dejar la app vacía sin explicación
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [sessionExpired, setSessionExpired] = useState(false);
+  // El prompt de setup solo debe salir en la primera carga, no en cada refetch
+  const isFirstLoad = useRef(true);
+  // Distingue "cerré sesión yo" de "la sesión se venció sola"
+  const manualSignOut = useRef(false);
 
   const t = T[lang];
 
-  const [form, setForm] = useState({ amount: '', category: '', date: new Date().toISOString().split('T')[0], description: '' });
+  const [form, setForm] = useState({ amount: '', category: '', date: todayLocal(), description: '' });
   const [goalForm, setGoalForm] = useState({ name: '', targetAmount: '', currentAmount: '', deadline: '', emoji: '🎯', color: GOAL_COLORS[0] });
   // Setup de presupuesto (Fase 2): montos como strings de dígitos para formatear al mostrar
   const [setupForm, setSetupForm] = useState<Record<string, string>>({});
@@ -419,42 +438,85 @@ export default function App() {
 
   // ── Auth: listen for sign-in / sign-out ──
   useEffect(() => {
-    const { data: { subscription } } = onAuthStateChange((id, email) => {
+    const { data: { subscription } } = onAuthStateChange((id, email, event) => {
       setUserId(id);
       setUserEmail(email);
       setAuthLoading(false);
+      if (id) {
+        setSessionExpired(false);
+      } else {
+        // Volvemos al login: la próxima carga vuelve a ser "la primera"
+        isFirstLoad.current = true;
+        // Si nadie pulsó "cerrar sesión", el token venció o el refresh falló
+        if (event === 'SIGNED_OUT' && !manualSignOut.current) setSessionExpired(true);
+        manualSignOut.current = false;
+      }
     });
     return () => subscription.unsubscribe();
   }, []);
 
-  // ── Data: load from Supabase whenever userId changes ──
-  useEffect(() => {
-    if (!userId) return;
-    (async () => {
-      await migrateLocalStorageToSupabase(userId);
+  // ── Data: carga desde Supabase, reutilizable para el refetch ──
+  const loadData = useCallback(async (uid: string) => {
+    setLoadError(null);
+    try {
+      // Renueva el token si hace falta. Sin esto, una sesión vencida deja las
+      // queries fallando contra RLS y la app se queda vacía sin avisar.
+      if (!(await hasValidSession())) {
+        setSessionExpired(true);
+        return;
+      }
+      await migrateLocalStorageToSupabase(uid);
       const [txs, gls, plan] = await Promise.all([
-        fetchTransactions(userId),
-        fetchGoals(userId),
-        fetchBudgetPlan(userId),
+        fetchTransactions(uid),
+        fetchGoals(uid),
+        fetchBudgetPlan(uid),
       ]);
       // Transacciones 'saving' del modelo viejo quedan ocultas (no se borran de la DB)
       setTransactions(txs.filter(r => r.type !== 'saving').map(dbRowToTransaction));
       setGoals(gls.map(dbRowToGoal));
       const loadedPlan = plan ? dbRowToBudgetPlan(plan) : EMPTY_BUDGET_PLAN;
       setBudgetPlan(loadedPlan);
-      // Prompt de setup al login: solo si no hay ningún monto configurado y nunca lo saltó (siempre saltable).
+      // Prompt de setup: solo en la primera carga tras entrar, nunca en un refetch
+      // (si no, el modal saltaría cada vez que vuelves a la app).
       // Se mira budgets (no setupDone): vaciar todos los montos vuelve a contar como "sin configurar".
-      const loadedHasBudget = Object.values(loadedPlan.budgets).some(v => v > 0);
-      if (!loadedHasBudget && !localStorage.getItem(`ff_budget_setup_dismissed_${userId}`)) {
-        openBudgetSetup(loadedPlan);
+      if (isFirstLoad.current) {
+        isFirstLoad.current = false;
+        const loadedHasBudget = Object.values(loadedPlan.budgets).some(v => v > 0);
+        if (!loadedHasBudget && !localStorage.getItem(`ff_budget_setup_dismissed_${uid}`)) {
+          openBudgetSetup(loadedPlan);
+        }
       }
-    })();
+    } catch (e: unknown) {
+      setLoadError(e instanceof Error ? e.message : 'No se pudieron cargar tus datos');
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [userId]);
+  }, []);
+
+  useEffect(() => {
+    if (!userId) return;
+    loadData(userId);
+  }, [userId, loadData]);
+
+  // ── Refetch al volver el foco o al recuperar la red ──
+  // El JWT dura 1 hora y su renovación automática no corre mientras la pestaña
+  // está suspendida (celular en el bolsillo, PC dormido). Al volver, recargamos:
+  // así los datos nunca quedan viejos ni vacíos por una sesión dormida.
+  useEffect(() => {
+    if (!userId) return;
+    const refetch = () => {
+      if (document.visibilityState === 'visible') loadData(userId);
+    };
+    document.addEventListener('visibilitychange', refetch);
+    window.addEventListener('online', refetch);
+    return () => {
+      document.removeEventListener('visibilitychange', refetch);
+      window.removeEventListener('online', refetch);
+    };
+  }, [userId, loadData]);
 
   // ── Período filtrado (para vistas y resúmenes del mes) ──
   const filteredByPeriod = useMemo(() => transactions.filter(tx => {
-    const d = new Date(tx.date);
+    const d = parseLocalDate(tx.date);
     const mMatch = filterMonth === 'all' || d.getMonth().toString() === filterMonth;
     return mMatch && d.getFullYear().toString() === filterYear;
   }), [transactions, filterMonth, filterYear]);
@@ -506,15 +568,15 @@ export default function App() {
     let base = [...filteredByPeriod];
     if (activeView === 'income') base = base.filter(tx => tx.type === 'income');
     else if (activeView === 'expenses') base = base.filter(tx => tx.type === 'expense');
-    return base.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+    return base.sort((a, b) => parseLocalDate(b.date).getTime() - parseLocalDate(a.date).getTime());
   }, [activeView, filteredByPeriod]);
 
   const chartData = useMemo(() => t.months.map((name, i) => {
-    const yearTx = transactions.filter(tx => new Date(tx.date).getFullYear().toString() === filterYear);
+    const yearTx = transactions.filter(tx => parseLocalDate(tx.date).getFullYear().toString() === filterYear);
     return {
       name,
-      income: yearTx.filter(tx => tx.type === 'income' && new Date(tx.date).getMonth() === i).reduce((a, tx) => a + tx.amount, 0),
-      expense: yearTx.filter(tx => tx.type === 'expense' && new Date(tx.date).getMonth() === i).reduce((a, tx) => a + tx.amount, 0),
+      income: yearTx.filter(tx => tx.type === 'income' && parseLocalDate(tx.date).getMonth() === i).reduce((a, tx) => a + tx.amount, 0),
+      expense: yearTx.filter(tx => tx.type === 'expense' && parseLocalDate(tx.date).getMonth() === i).reduce((a, tx) => a + tx.amount, 0),
     };
   }).slice(0, new Date().getMonth() + 1), [transactions, filterYear, t]);
 
@@ -531,7 +593,7 @@ export default function App() {
   const openAdd = (type: 'income' | 'expense') => {
     setEditingTransaction(null);
     const cats = type === 'income' ? INCOME_CATEGORIES : EXPENSE_CATEGORIES;
-    setForm({ amount: '', category: cats[0].id, date: new Date().toISOString().split('T')[0], description: '' });
+    setForm({ amount: '', category: cats[0].id, date: todayLocal(), description: '' });
     setModalMode(`${type}-form` as ModalMode);
   };
 
@@ -541,6 +603,17 @@ export default function App() {
     setModalMode('edit-form');
   };
 
+  // Mensaje de error de guardado. La UI se actualiza de forma optimista, así que
+  // si la escritura falla hay que DESHACERLA: de lo contrario el movimiento se ve
+  // en pantalla como si estuviera guardado y desaparece al recargar.
+  const reportWriteError = (e: unknown) => {
+    setLoadError(
+      e instanceof Error
+        ? `No se pudo guardar: ${e.message}`
+        : 'No se pudo guardar. Revisa tu conexión e intenta de nuevo.'
+    );
+  };
+
   // Se registra y listo — sin distribución, sin modales extra.
   const handleSaveTransaction = async (type: 'income' | 'expense') => {
     if (!form.amount || !form.category || !userId) return;
@@ -548,33 +621,65 @@ export default function App() {
     const txFields = { amount, category: form.category, date: form.date, description: form.description };
 
     if (editingTransaction) {
-      setTransactions(prev => prev.map(tx => tx.id === editingTransaction.id ? { ...tx, ...txFields } : tx));
-      await updateTransaction(editingTransaction.id, txFields);
+      const previous = editingTransaction;
+      setTransactions(prev => prev.map(tx => tx.id === previous.id ? { ...tx, ...txFields } : tx));
+      try {
+        await updateTransaction(previous.id, txFields);
+      } catch (e) {
+        setTransactions(prev => prev.map(tx => tx.id === previous.id ? previous : tx));
+        reportWriteError(e);
+        return;
+      }
     } else {
       const newId = crypto.randomUUID();
       const newTx: Transaction = { id: newId, ...txFields, type };
       setTransactions(prev => [newTx, ...prev]);
-      await saveTransaction(userId, { id: newId, ...txFields, type });
+      try {
+        await saveTransaction(userId, { id: newId, ...txFields, type });
+      } catch (e) {
+        setTransactions(prev => prev.filter(tx => tx.id !== newId));
+        reportWriteError(e);
+        return;
+      }
     }
     setModalMode('closed');
   };
 
   const handleDelete = async (id: string) => {
+    const removed = transactions.find(tx => tx.id === id);
     setTransactions(prev => prev.filter(t => t.id !== id));
     setDeleteConfirm(null);
-    await deleteTransaction(id);
+    try {
+      await deleteTransaction(id);
+    } catch (e) {
+      if (removed) setTransactions(prev => [removed, ...prev]);
+      reportWriteError(e);
+    }
   };
 
   const handleSaveGoal = async () => {
     if (!goalForm.name || !goalForm.targetAmount || !userId) return;
     const goalData = { name: goalForm.name, targetAmount: parseFloat(goalForm.targetAmount), currentAmount: parseFloat(goalForm.currentAmount || '0'), deadline: goalForm.deadline, emoji: goalForm.emoji, color: goalForm.color };
     if (editingGoal) {
-      setGoals(prev => prev.map(g => g.id === editingGoal.id ? { ...g, ...goalData } : g));
-      await updateGoal(editingGoal.id, { name: goalData.name, target_amount: goalData.targetAmount, current_amount: goalData.currentAmount, deadline: goalData.deadline, emoji: goalData.emoji, color: goalData.color });
+      const previous = editingGoal;
+      setGoals(prev => prev.map(g => g.id === previous.id ? { ...g, ...goalData } : g));
+      try {
+        await updateGoal(previous.id, { name: goalData.name, target_amount: goalData.targetAmount, current_amount: goalData.currentAmount, deadline: goalData.deadline, emoji: goalData.emoji, color: goalData.color });
+      } catch (e) {
+        setGoals(prev => prev.map(g => g.id === previous.id ? previous : g));
+        reportWriteError(e);
+        return;
+      }
     } else {
       const newId = crypto.randomUUID();
       setGoals(prev => [...prev, { id: newId, ...goalData }]);
-      await saveGoal(userId, { id: newId, name: goalData.name, target_amount: goalData.targetAmount, current_amount: goalData.currentAmount, deadline: goalData.deadline, emoji: goalData.emoji, color: goalData.color });
+      try {
+        await saveGoal(userId, { id: newId, name: goalData.name, target_amount: goalData.targetAmount, current_amount: goalData.currentAmount, deadline: goalData.deadline, emoji: goalData.emoji, color: goalData.color });
+      } catch (e) {
+        setGoals(prev => prev.filter(g => g.id !== newId));
+        reportWriteError(e);
+        return;
+      }
     }
     setModalMode('closed');
     setEditingGoal(null);
@@ -610,9 +715,15 @@ export default function App() {
       if (n > 0) budgets[c.id] = n;
     });
     const next: BudgetPlan = { ...budgetPlan, income: parseInt(setupIncome) || 0, budgets, setupDone: Object.keys(budgets).length > 0 };
+    const previous = budgetPlan;
     setBudgetPlan(next);
     setModalMode('closed');
-    await upsertBudgetPlan(userId, { income: next.income, frequency: next.frequency, budgets: next.budgets, setup_done: next.setupDone, current_month: next.currentMonth });
+    try {
+      await upsertBudgetPlan(userId, { income: next.income, frequency: next.frequency, budgets: next.budgets, setup_done: next.setupDone, current_month: next.currentMonth });
+    } catch (e) {
+      setBudgetPlan(previous);
+      reportWriteError(e);
+    }
   };
 
   // Saltar = cerrar sin guardar y no volver a insistir en este dispositivo
@@ -626,13 +737,20 @@ export default function App() {
   const updateBudgetPlanAmount = async (catId: string, newAmount: number) => {
     const nextBudgets = { ...budgetPlan.budgets, [catId]: newAmount };
     const next: BudgetPlan = { ...budgetPlan, budgets: nextBudgets, setupDone: Object.values(nextBudgets).some((v: number) => v > 0) };
+    const previous = budgetPlan;
     setBudgetPlan(next);
     if (userId) {
-      await upsertBudgetPlan(userId, { income: next.income, frequency: next.frequency, budgets: next.budgets, setup_done: next.setupDone, current_month: next.currentMonth });
+      try {
+        await upsertBudgetPlan(userId, { income: next.income, frequency: next.frequency, budgets: next.budgets, setup_done: next.setupDone, current_month: next.currentMonth });
+      } catch (e) {
+        setBudgetPlan(previous);
+        reportWriteError(e);
+      }
     }
   };
 
   const handleSignOut = async () => {
+    manualSignOut.current = true;
     await signOut();
     setTransactions([]);
     setGoals([]);
@@ -659,7 +777,7 @@ export default function App() {
       <div className="w-10 h-10 border-4 border-indigo-200 border-t-indigo-600 rounded-full animate-spin" />
     </div>
   );
-  if (!userId) return <LoginScreen />;
+  if (!userId) return <LoginScreen expiredNotice={sessionExpired ? t.sessionExpired : undefined} />;
 
   return (
     <div className="min-h-screen bg-[#F4F5F7] flex text-[#0f0f0f] font-sans">
@@ -754,6 +872,23 @@ export default function App() {
             </button>
           </div>
         </header>
+
+        {/* Banner de error: la app nunca debe quedarse vacía o perder un guardado en silencio */}
+        {loadError && (
+          <div className="mx-4 md:mx-8 mt-4 bg-red-50 border border-red-200 rounded-2xl p-4 flex items-start gap-3">
+            <AlertTriangle size={18} className="text-red-500 flex-shrink-0 mt-0.5" />
+            <div className="flex-1 min-w-0">
+              <p className="font-display font-bold text-sm text-red-700">{t.errorTitle}</p>
+              <p className="text-xs text-red-600 mt-0.5 break-words">{loadError}</p>
+            </div>
+            <button
+              onClick={() => userId && loadData(userId)}
+              className="bg-red-600 text-white px-3 py-1.5 rounded-xl text-xs font-semibold hover:bg-red-700 transition-all flex-shrink-0"
+            >
+              {t.retry}
+            </button>
+          </div>
+        )}
 
         <div className="px-4 md:px-8 py-5 space-y-5">
           {/* Filters */}
@@ -880,7 +1015,7 @@ export default function App() {
                       </div>
                       {!showAllTx ? (
                         <div className="space-y-1">
-                          {filteredByPeriod.sort((a,b) => new Date(b.date).getTime() - new Date(a.date).getTime()).slice(0, 5).map(tx => (
+                          {filteredByPeriod.sort((a,b) => parseLocalDate(b.date).getTime() - parseLocalDate(a.date).getTime()).slice(0, 5).map(tx => (
                             <TxRow key={tx.id} tx={tx} lang={lang} onEdit={openEdit} onDelete={id => setDeleteConfirm(id)} />
                           ))}
                           {filteredByPeriod.length === 0 && <EmptyState label={t.noTransactions} desc={t.noTransactionsDesc} onAdd={() => setModalMode('selection')} btnLabel={t.addNow} />}
@@ -888,7 +1023,7 @@ export default function App() {
                       ) : (
                         <div className="space-y-1">
                           {(['income', 'expense'] as const).map(type => {
-                            const typeTxs = filteredByPeriod.filter(tx => tx.type === type).sort((a,b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+                            const typeTxs = filteredByPeriod.filter(tx => tx.type === type).sort((a,b) => parseLocalDate(b.date).getTime() - parseLocalDate(a.date).getTime());
                             if (typeTxs.length === 0) return null;
                             const typeColor = type === 'income' ? '#10b981' : '#ef4444';
                             const typeLabel = type === 'income' ? t.income : t.expenses;
